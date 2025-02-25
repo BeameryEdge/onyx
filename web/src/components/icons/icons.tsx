@@ -3069,6 +3069,23 @@ export const SourcesIcon = ({
   );
 };
 
+export const MenuIcon = ({
+  size = 30,
+  className = defaultTailwindCSS,
+}: IconProps) => {
+  return (
+    <svg
+      style={{ width: `30px`, height: `${size}px` }}
+      className={`w-[${size}px] h-[${size}px] ` + className}
+      viewBox="0 0 28 29"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+    </svg>
+  );
+};
+
 export const WebSearchIcon = ({
   size = 24,
   className = defaultTailwindCSS,
