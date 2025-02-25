@@ -2576,7 +2576,8 @@ export const PinIcon = ({
 }: IconProps) => {
   return (
     <svg
-      style={{ width: `40px`, height: `80px` }}
+      style={{ width: `${size}px`, height: `${size}px` }}
+      className={`w-[${size}px] h-[${size}px] ` + className}
       xmlns="http://www.w3.org/2000/svg"
       width="200"
       height="200"
@@ -2600,7 +2601,8 @@ export const TwoRightArrowIcons = ({
 }: IconProps) => {
   return (
     <svg
-      style={{ width: `40px`, height: `80px` }}
+      style={{ width: `${size}px`, height: `${size}px` }}
+      className={`w-[${size}px] h-[${size}px] ` + className}
       xmlns="http://www.w3.org/2000/svg"
       width="200"
       height="200"
