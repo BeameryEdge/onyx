@@ -2,7 +2,7 @@
 import { useContext } from "react";
 import { FiSidebar } from "react-icons/fi";
 import { SettingsContext } from "../settings/SettingsProvider";
-import { LeftToLineIcon, NewChatIcon, RightToLineIcon } from "../icons/icons";
+import { LeftToLineIcon, MenuIcon, RightToLineIcon } from "../icons/icons";
 import {
   Tooltip,
   TooltipContent,
@@ -100,9 +100,9 @@ export default function LogoWithText({
                   }
                 }}
               >
-                <NewChatIcon
+                <MenuIcon
                   className="ml-2 flex-none text-text-700 hover:text-text-600 "
-                  size={24}
+                  size={30}
                 />
               </Link>
             </TooltipTrigger>
