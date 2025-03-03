@@ -159,7 +159,7 @@ def start_playwright() -> Tuple[Playwright, BrowserContext]:
     playwright = sync_playwright().start()
     browser = playwright.chromium.launch(headless=True)
 
-    context = browser.new_context()
+    context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
     if (
         WEB_CONNECTOR_OAUTH_CLIENT_ID
@@ -354,17 +354,25 @@ class WebConnector(LoadConnector):
 
                 page = context.new_page()
 
-                # Can't use wait_until="networkidle" because it interferes with the scrolling behavior
-                page_response = page.goto(
-                    initial_url,
-                    timeout=30000,  # 30 seconds
-                )
+                try:
+                    page_response = page.goto(initial_url, timeout=60000, wait_until="domcontentloaded")
+                    
+                    # Try waiting for network to settle, but handle timeout
+                    try:
+                        page.wait_for_load_state("domcontentloaded", timeout=10000)  # Reduced timeout
+                    except playwright._impl._errors.TimeoutError:
+                        logger.warning(f"Network idle timeout exceeded for {initial_url}, proceeding anyway.")
+                    
+                except playwright._impl._errors.TimeoutError:
+                    logger.error(f"Page load timeout for {initial_url}, skipping.")
+                    continue  # Skip this URL and move to the next one
 
                 last_modified = (
                     page_response.header_value("Last-Modified")
                     if page_response
                     else None
                 )
+                
                 final_url = page.url
                 if final_url != initial_url:
                     protected_url_check(final_url)
