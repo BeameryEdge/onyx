@@ -93,8 +93,8 @@ def protected_url_check(url: str) -> None:
                 f"The Web Connector is not allowed to read loopback, link-local, or private ranges"
             )
 
+
 async def check_internet_connection(url: str) -> None:
-    """Check if a URL is accessible using Playwright (Async API), handling common errors."""
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
@@ -161,7 +161,7 @@ def get_internal_links(
 
 def start_playwright() -> Tuple[Playwright, BrowserContext]:
     playwright = sync_playwright().start()
-    browser = playwright.chromium.launch(headless=True)
+    browser = playwright.chromium.launch(headless=False)
 
     context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
@@ -358,18 +358,11 @@ class WebConnector(LoadConnector):
 
                 page = context.new_page()
 
-                try:
-                    page_response = page.goto(initial_url, timeout=60000, wait_until="domcontentloaded")
-                    
-                    # Try waiting for network to settle, but handle timeout
-                    try:
-                        page.wait_for_load_state("domcontentloaded", timeout=10000)  # Reduced timeout
-                    except playwright._impl._errors.TimeoutError:
-                        logger.warning(f"Network idle timeout exceeded for {initial_url}, proceeding anyway.")
-                    
-                except playwright._impl._errors.TimeoutError:
-                    logger.error(f"Page load timeout for {initial_url}, skipping.")
-                    continue  # Skip this URL and move to the next one
+                # Can't use wait_until="networkidle" because it interferes with the scrolling behavior
+                page_response = page.goto(
+                    initial_url,
+                    timeout=30000,  # 30 seconds
+                )
 
                 last_modified = (
                     page_response.header_value("Last-Modified")
@@ -396,7 +389,7 @@ class WebConnector(LoadConnector):
                     previous_height = page.evaluate("document.body.scrollHeight")
                     while scroll_attempts < WEB_CONNECTOR_MAX_SCROLL_ATTEMPTS:
                         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                        page.wait_for_load_state("networkidle", timeout=30000)
+                        page.wait_for_load_state("domcontentloaded", timeout=30000)
                         new_height = page.evaluate("document.body.scrollHeight")
                         if new_height == previous_height:
                             break  # Stop scrolling when no more content is loaded
@@ -468,19 +461,28 @@ class WebConnector(LoadConnector):
             except Exception as e:
                 last_error = f"Failed to fetch '{initial_url}': {e}"
                 logger.exception(last_error)
-                playwright.stop()
+                try:
+                    playwright.stop()
+                except Exception as e:
+                    logger.warning(f"Failed to stop Playwright: {e}")
                 restart_playwright = True
                 continue
 
             if len(doc_batch) >= self.batch_size:
-                playwright.stop()
+                try:
+                    playwright.stop()
+                except Exception as e:
+                    logger.warning(f"Failed to stop Playwright: {e}")
                 restart_playwright = True
                 at_least_one_doc = True
                 yield doc_batch
                 doc_batch = []
 
         if doc_batch:
-            playwright.stop()
+            try:
+                playwright.stop()
+            except Exception as e:
+                    logger.warning(f"Failed to stop Playwright: {e}")
             at_least_one_doc = True
             yield doc_batch
 
