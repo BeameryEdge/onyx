@@ -103,7 +103,7 @@ async def check_internet_connection(url: str) -> None:
             )
             page = await context.new_page()
 
-            response = await page.goto(url, timeout=6000)  # 6s timeout
+            response = await page.goto(url, timeout=6000, wait_until="domcontentloaded")  # 6s timeout
             
             if response is None:
                 raise Exception(f"Failed to fetch {url} - No response received")
@@ -360,10 +360,18 @@ class WebConnector(LoadConnector):
                 page = context.new_page()
 
                 # Can't use wait_until="networkidle" because it interferes with the scrolling behavior
-                page_response = page.goto(
-                    initial_url,
-                    timeout=30000,  # 30 seconds
-                )
+                try:
+                    page_response = page.goto(initial_url, timeout=60000, wait_until="domcontentloaded")
+                    
+                    # Try waiting for network to settle, but handle timeout
+                    try:
+                        page.wait_for_load_state("domcontentloaded", timeout=10000)  # Reduced timeout
+                    except playwright._impl._errors.TimeoutError:
+                        logger.warning(f"Network idle timeout exceeded for {initial_url}, proceeding anyway.")
+                    
+                except playwright._impl._errors.TimeoutError:
+                    logger.error(f"Page load timeout for {initial_url}, skipping.")
+                    continue  # Skip this URL and move to the next one
 
                 last_modified = (
                     page_response.header_value("Last-Modified")
@@ -389,7 +397,7 @@ class WebConnector(LoadConnector):
                     previous_height = page.evaluate("document.body.scrollHeight")
                     while scroll_attempts < WEB_CONNECTOR_MAX_SCROLL_ATTEMPTS:
                         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                        page.wait_for_load_state("networkidle", timeout=30000)
+                        page.wait_for_load_state("domcontentloaded", timeout=30000)
                         new_height = page.evaluate("document.body.scrollHeight")
                         if new_height == previous_height:
                             break  # Stop scrolling when no more content is loaded
@@ -461,19 +469,28 @@ class WebConnector(LoadConnector):
             except Exception as e:
                 last_error = f"Failed to fetch '{initial_url}': {e}"
                 logger.exception(last_error)
-                playwright.stop()
+                try:
+                    playwright.stop()
+                except Exception as e:
+                    logger.warning(f"Failed to stop Playwright: {e}")
                 restart_playwright = True
                 continue
 
             if len(doc_batch) >= self.batch_size:
-                playwright.stop()
+                try:
+                    playwright.stop()
+                except Exception as e:
+                    logger.warning(f"Failed to stop Playwright: {e}")
                 restart_playwright = True
                 at_least_one_doc = True
                 yield doc_batch
                 doc_batch = []
 
         if doc_batch:
-            playwright.stop()
+            try:
+                playwright.stop()
+            except Exception as e:
+                    logger.warning(f"Failed to stop Playwright: {e}")
             at_least_one_doc = True
             yield doc_batch
 
