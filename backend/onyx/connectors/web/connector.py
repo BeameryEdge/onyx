@@ -97,6 +97,7 @@ async def check_internet_connection(url: str) -> None:
     """Check if a URL is accessible using Playwright (Async API), handling common errors."""
     try:
 <<<<<<< HEAD
+<<<<<<< HEAD
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             context = await browser.new_context(
@@ -105,11 +106,20 @@ async def check_internet_connection(url: str) -> None:
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(
 >>>>>>> e77e93c2 (Use playwright tinstead of requests)
+=======
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+>>>>>>> ecb52ce6 (Use playwright tinstead of requests async)
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
             page = await context.new_page()
 
+<<<<<<< HEAD
             response = await page.goto(url, timeout=6000, wait_until="domcontentloaded")  # 6s timeout
+=======
+            response = await page.goto(url, timeout=6000)  # 6s timeout
+>>>>>>> ecb52ce6 (Use playwright tinstead of requests async)
             
             if response is None:
                 raise Exception(f"Failed to fetch {url} - No response received")
