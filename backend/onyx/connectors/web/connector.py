@@ -96,9 +96,15 @@ def protected_url_check(url: str) -> None:
 async def check_internet_connection(url: str) -> None:
     """Check if a URL is accessible using Playwright (Async API), handling common errors."""
     try:
+<<<<<<< HEAD
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             context = await browser.new_context(
+=======
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=False)
+            context = browser.new_context(
+>>>>>>> e77e93c2 (Use playwright tinstead of requests)
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
             page = await context.new_page()
