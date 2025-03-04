@@ -16,6 +16,7 @@ from oauthlib.oauth2 import BackendApplicationClient
 from playwright.sync_api import BrowserContext
 from playwright.sync_api import Playwright
 from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 from requests_oauthlib import OAuth2Session  # type:ignore
 from urllib3.exceptions import MaxRetryError
 
@@ -92,17 +93,17 @@ def protected_url_check(url: str) -> None:
                 f"The Web Connector is not allowed to read loopback, link-local, or private ranges"
             )
 
-def check_internet_connection(url: str) -> None:
-    """Check if a URL is accessible using Playwright, handling common errors."""
+async def check_internet_connection(url: str) -> None:
+    """Check if a URL is accessible using Playwright (Async API), handling common errors."""
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
-            page = context.new_page()
-            
-            response = page.goto(url, timeout=3000)  # 6s timeout
+            page = await context.new_page()
+
+            response = await page.goto(url, timeout=6000)  # 6s timeout
             
             if response is None:
                 raise Exception(f"Failed to fetch {url} - No response received")
@@ -121,7 +122,7 @@ def check_internet_connection(url: str) -> None:
                 }.get(status_code, "HTTP Error")
                 raise Exception(f"{error_msg} ({status_code}) for {url}")
 
-            browser.close()
+            await browser.close()
     
     except Exception as e:
         raise Exception(f"Unable to reach {url} - check your internet connection: {e}")
