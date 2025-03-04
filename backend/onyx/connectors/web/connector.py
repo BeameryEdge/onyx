@@ -297,8 +297,8 @@ class WebConnector(LoadConnector):
 
         if not to_visit:
             raise ValueError("No URLs to visit")
-        logger.info(f"Fetching base_url: {base_url}")
         base_url = to_visit[0]  # For the recursive case
+        logger.info(f"Fetching base_url: {base_url}")
         doc_batch: list[Document] = []
 
         # Needed to report error
