@@ -297,8 +297,8 @@ class WebConnector(LoadConnector):
 
         if not to_visit:
             raise ValueError("No URLs to visit")
-
         base_url = to_visit[0]  # For the recursive case
+        logger.info(f"Fetching base_url: {base_url}")
         doc_batch: list[Document] = []
 
         # Needed to report error
@@ -309,6 +309,7 @@ class WebConnector(LoadConnector):
         restart_playwright = False
         while to_visit:
             initial_url = to_visit.pop()
+            logger.info(f"Fetching URL: {initial_url}")
             if initial_url in visited_links:
                 continue
             visited_links.add(initial_url)
@@ -366,6 +367,10 @@ class WebConnector(LoadConnector):
                 except playwright._impl._errors.TimeoutError:
                     logger.error(f"Page load timeout for {initial_url}, skipping.")
                     continue  # Skip this URL and move to the next one
+
+                page.goto("https://eightfold.ai/", timeout=60000)
+                print(f"Final URL: {page.url}")
+                print(f"Page Title: {page.title()}")
 
                 last_modified = (
                     page_response.header_value("Last-Modified")
