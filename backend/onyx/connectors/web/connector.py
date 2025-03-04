@@ -162,7 +162,7 @@ def get_internal_links(
 
 def start_playwright() -> Tuple[Playwright, BrowserContext]:
     playwright = sync_playwright().start()
-    browser = playwright.chromium.launch(headless=True)
+    browser = playwright.chromium.launch(headless=False)
 
     context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
@@ -302,8 +302,8 @@ class WebConnector(LoadConnector):
 
         if not to_visit:
             raise ValueError("No URLs to visit")
+
         base_url = to_visit[0]  # For the recursive case
-        logger.info(f"Fetching base_url: {base_url}")
         doc_batch: list[Document] = []
 
         # Needed to report error
@@ -314,7 +314,6 @@ class WebConnector(LoadConnector):
         restart_playwright = False
         while to_visit:
             initial_url = to_visit.pop()
-            logger.info(f"Fetching URL: {initial_url}")
             if initial_url in visited_links:
                 continue
             visited_links.add(initial_url)
