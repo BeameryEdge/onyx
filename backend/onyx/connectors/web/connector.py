@@ -92,35 +92,39 @@ def protected_url_check(url: str) -> None:
                 f"The Web Connector is not allowed to read loopback, link-local, or private ranges"
             )
 
-
 def check_internet_connection(url: str) -> None:
+    """Check if a URL is accessible using Playwright, handling common errors."""
     try:
-        response = requests.get(url, timeout=3)
-        response.raise_for_status()
-    except requests.exceptions.HTTPError as e:
-        # Extract status code from the response, defaulting to -1 if response is None
-        status_code = e.response.status_code if e.response is not None else -1
-        error_msg = {
-            400: "Bad Request",
-            401: "Unauthorized",
-            403: "Forbidden",
-            404: "Not Found",
-            500: "Internal Server Error",
-            502: "Bad Gateway",
-            503: "Service Unavailable",
-            504: "Gateway Timeout",
-        }.get(status_code, "HTTP Error")
-        raise Exception(f"{error_msg} ({status_code}) for {url} - {e}")
-    except requests.exceptions.SSLError as e:
-        cause = (
-            e.args[0].reason
-            if isinstance(e.args, tuple) and isinstance(e.args[0], MaxRetryError)
-            else e.args
-        )
-        raise Exception(f"SSL error {str(cause)}")
-    except (requests.RequestException, ValueError) as e:
-        raise Exception(f"Unable to reach {url} - check your internet connection: {e}")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+            page = context.new_page()
+            
+            response = page.goto(url, timeout=3000)  # 6s timeout
+            
+            if response is None:
+                raise Exception(f"Failed to fetch {url} - No response received")
 
+            status_code = response.status
+            if status_code >= 400:
+                error_msg = {
+                    400: "Bad Request",
+                    401: "Unauthorized",
+                    403: "Forbidden",
+                    404: "Not Found",
+                    500: "Internal Server Error",
+                    502: "Bad Gateway",
+                    503: "Service Unavailable",
+                    504: "Gateway Timeout",
+                }.get(status_code, "HTTP Error")
+                raise Exception(f"{error_msg} ({status_code}) for {url}")
+
+            browser.close()
+    
+    except Exception as e:
+        raise Exception(f"Unable to reach {url} - check your internet connection: {e}")
 
 def is_valid_url(url: str) -> bool:
     try:
@@ -157,7 +161,7 @@ def get_internal_links(
 
 def start_playwright() -> Tuple[Playwright, BrowserContext]:
     playwright = sync_playwright().start()
-    browser = playwright.chromium.launch(headless=True)
+    browser = playwright.chromium.launch(headless=False)
 
     context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
@@ -297,8 +301,8 @@ class WebConnector(LoadConnector):
 
         if not to_visit:
             raise ValueError("No URLs to visit")
+
         base_url = to_visit[0]  # For the recursive case
-        logger.info(f"Fetching base_url: {base_url}")
         doc_batch: list[Document] = []
 
         # Needed to report error
@@ -309,7 +313,6 @@ class WebConnector(LoadConnector):
         restart_playwright = False
         while to_visit:
             initial_url = to_visit.pop()
-            logger.info(f"Fetching URL: {initial_url}")
             if initial_url in visited_links:
                 continue
             visited_links.add(initial_url)
@@ -360,10 +363,6 @@ class WebConnector(LoadConnector):
                     initial_url,
                     timeout=30000,  # 30 seconds
                 )
-
-                page.goto("https://eightfold.ai/", timeout=60000)
-                print(f"Final URL: {page.url}")
-                print(f"Page Title: {page.title()}")
 
                 last_modified = (
                     page_response.header_value("Last-Modified")
