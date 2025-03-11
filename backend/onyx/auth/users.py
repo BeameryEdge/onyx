@@ -100,6 +100,7 @@ from onyx.utils.logger import setup_logger
 from onyx.utils.telemetry import create_milestone_and_report
 from onyx.utils.telemetry import optional_telemetry
 from onyx.utils.telemetry import RecordType
+from onyx.utils.url import add_url_params
 from onyx.utils.variable_functionality import fetch_ee_implementation_or_noop
 from onyx.utils.variable_functionality import fetch_versioned_implementation
 from shared_configs.configs import async_return_default_schema
@@ -587,14 +588,20 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
     ) -> Optional[User]:
         email = credentials.username
 
-        # Get tenant_id from mapping table
-        tenant_id = await fetch_ee_implementation_or_noop(
-            "onyx.server.tenants.provisioning",
-            "get_or_provision_tenant",
-            async_return_default_schema,
-        )(
-            email=email,
-        )
+        tenant_id: str | None = None
+        try:
+            tenant_id = fetch_ee_implementation_or_noop(
+                "onyx.server.tenants.provisioning",
+                "get_tenant_id_for_email",
+                None,
+            )(
+                email=email,
+            )
+        except Exception as e:
+            logger.warning(
+                f"User attempted to login with invalid credentials: {str(e)}"
+            )
+
         if not tenant_id:
             # User not found in mapping
             self.password_helper.hash(credentials.password)
@@ -888,7 +895,7 @@ async def current_limited_user(
     return await double_check_user(user)
 
 
-async def current_chat_accesssible_user(
+async def current_chat_accessible_user(
     user: User | None = Depends(optional_user),
 ) -> User | None:
     tenant_id = get_current_tenant_id()
@@ -1089,6 +1096,12 @@ def get_oauth_router(
 
         next_url = state_data.get("next_url", "/")
         referral_source = state_data.get("referral_source", None)
+        try:
+            tenant_id = fetch_ee_implementation_or_noop(
+                "onyx.server.tenants.user_mapping", "get_tenant_id_for_email", None
+            )(account_email)
+        except exceptions.UserNotExists:
+            tenant_id = None
 
         request.state.referral_source = referral_source
 
@@ -1120,9 +1133,14 @@ def get_oauth_router(
         # Login user
         response = await backend.login(strategy, user)
         await user_manager.on_after_login(user, request, response)
-
         # Prepare redirect response
-        redirect_response = RedirectResponse(next_url, status_code=302)
+        if tenant_id is None:
+            # Use URL utility to add parameters
+            redirect_url = add_url_params(next_url, {"new_team": "true"})
+            redirect_response = RedirectResponse(redirect_url, status_code=302)
+        else:
+            # No parameters to add
+            redirect_response = RedirectResponse(next_url, status_code=302)
 
         # Copy headers and other attributes from 'response' to 'redirect_response'
         for header_name, header_value in response.headers.items():
@@ -1134,6 +1152,7 @@ def get_oauth_router(
             redirect_response.status_code = response.status_code
         if hasattr(response, "media_type"):
             redirect_response.media_type = response.media_type
+
         return redirect_response
 
     return router
