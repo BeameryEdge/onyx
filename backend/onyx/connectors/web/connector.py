@@ -1,6 +1,7 @@
 import io
 import ipaddress
 import socket
+import time
 from datetime import datetime
 from datetime import timezone
 from enum import Enum
@@ -342,6 +343,7 @@ class WebConnector(LoadConnector):
                 check_internet_connection(initial_url)
 
                 page = context.new_page()
+                time.sleep(5)
                 try:
                     page_response = page.goto(initial_url, timeout=30000)
                     page.wait_for_load_state("domcontentloaded", timeout=30000)
@@ -394,13 +396,14 @@ class WebConnector(LoadConnector):
                 last_error = f"Failed to fetch '{initial_url}': {e}"
                 logger.exception(last_error)
 
+                # Only restart Playwright if it's in a bad state
                 if playwright is not None:
                     try:
                         playwright.stop()
                     except Exception as e:
                         logger.warning(f"Failed to stop Playwright: {e}")
+                    playwright, context = start_playwright()
 
-                playwright, context = start_playwright()
                 continue
 
             if len(doc_batch) >= self.batch_size:
@@ -415,12 +418,12 @@ class WebConnector(LoadConnector):
                 doc_batch = []
 
         if doc_batch:
+            yield doc_batch
             if playwright is not None:
                 try:
                     playwright.stop()
                 except Exception as e:
                     logger.warning(f"Failed to stop Playwright: {e}")
-            yield doc_batch
 
         if not at_least_one_doc and last_error:
             raise RuntimeError(last_error)
