@@ -16,6 +16,7 @@ from oauthlib.oauth2 import BackendApplicationClient
 from playwright.sync_api import BrowserContext
 from playwright.sync_api import Playwright
 from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 from requests_oauthlib import OAuth2Session  # type:ignore
 from urllib3.exceptions import MaxRetryError
 
@@ -32,7 +33,7 @@ from onyx.connectors.exceptions import UnexpectedValidationError
 from onyx.connectors.interfaces import GenerateDocumentsOutput
 from onyx.connectors.interfaces import LoadConnector
 from onyx.connectors.models import Document
-from onyx.connectors.models import TextSection
+from onyx.connectors.models import Section
 from onyx.file_processing.extract_file_text import read_pdf_file
 from onyx.file_processing.html_utils import web_html_cleanup
 from onyx.utils.logger import setup_logger
@@ -93,34 +94,37 @@ def protected_url_check(url: str) -> None:
             )
 
 
-def check_internet_connection(url: str) -> None:
+async def check_internet_connection(url: str) -> None:
     try:
-        response = requests.get(url, timeout=3)
-        response.raise_for_status()
-    except requests.exceptions.HTTPError as e:
-        # Extract status code from the response, defaulting to -1 if response is None
-        status_code = e.response.status_code if e.response is not None else -1
-        error_msg = {
-            400: "Bad Request",
-            401: "Unauthorized",
-            403: "Forbidden",
-            404: "Not Found",
-            500: "Internal Server Error",
-            502: "Bad Gateway",
-            503: "Service Unavailable",
-            504: "Gateway Timeout",
-        }.get(status_code, "HTTP Error")
-        raise Exception(f"{error_msg} ({status_code}) for {url} - {e}")
-    except requests.exceptions.SSLError as e:
-        cause = (
-            e.args[0].reason
-            if isinstance(e.args, tuple) and isinstance(e.args[0], MaxRetryError)
-            else e.args
-        )
-        raise Exception(f"SSL error {str(cause)}")
-    except (requests.RequestException, ValueError) as e:
-        raise Exception(f"Unable to reach {url} - check your internet connection: {e}")
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+            )
+            page = await context.new_page()
+            response = await page.goto(url, timeout=6000, wait_until="domcontentloaded")  # 6s timeout
+            
+            if response is None:
+                raise Exception(f"Failed to fetch {url} - No response received")
 
+            status_code = response.status
+            if status_code >= 400:
+                error_msg = {
+                    400: "Bad Request",
+                    401: "Unauthorized",
+                    403: "Forbidden",
+                    404: "Not Found",
+                    500: "Internal Server Error",
+                    502: "Bad Gateway",
+                    503: "Service Unavailable",
+                    504: "Gateway Timeout",
+                }.get(status_code, "HTTP Error")
+                raise Exception(f"{error_msg} ({status_code}) for {url}")
+
+            await browser.close()
+    
+    except Exception as e:
+        raise Exception(f"Unable to reach {url} - check your internet connection: {e}")
 
 def is_valid_url(url: str) -> bool:
     try:
@@ -160,7 +164,7 @@ def start_playwright() -> Tuple[Playwright, BrowserContext]:
 
     browser = playwright.chromium.launch(headless=True)
 
-    context = browser.new_context()
+    context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
     if (
         WEB_CONNECTOR_OAUTH_CLIENT_ID
@@ -327,6 +331,10 @@ class WebConnector(LoadConnector):
             try:
                 check_internet_connection(initial_url)
                 if restart_playwright:
+                    try:
+                        playwright.stop()
+                    except Exception as e:
+                        logger.warning(f"Failed to stop Playwright: {e}")
                     playwright, context = start_playwright()
                     restart_playwright = False
 
@@ -341,7 +349,7 @@ class WebConnector(LoadConnector):
                     doc_batch.append(
                         Document(
                             id=initial_url,
-                            sections=[TextSection(link=initial_url, text=page_text)],
+                            sections=[Section(link=initial_url, text=page_text)],
                             source=DocumentSource.WEB,
                             semantic_identifier=initial_url.split("/")[-1],
                             metadata=metadata,
@@ -356,17 +364,19 @@ class WebConnector(LoadConnector):
 
                 page = context.new_page()
 
-                # Can't use wait_until="networkidle" because it interferes with the scrolling behavior
-                page_response = page.goto(
-                    initial_url,
-                    timeout=30000,  # 30 seconds
-                )
+                try:
+                    page_response = page.goto(initial_url, timeout=30000)
+                    page.wait_for_load_state("domcontentloaded", timeout=30000)  # Change from "networkidle"
+                except playwright._impl._errors.TimeoutError:
+                    logger.warning(f"Timeout while loading {initial_url}, skipping...")
+                    continue
 
                 last_modified = (
                     page_response.header_value("Last-Modified")
                     if page_response
                     else None
                 )
+                
                 final_url = page.url
                 if final_url != initial_url:
                     protected_url_check(final_url)
@@ -383,8 +393,12 @@ class WebConnector(LoadConnector):
                     scroll_attempts = 0
                     previous_height = page.evaluate("document.body.scrollHeight")
                     while scroll_attempts < WEB_CONNECTOR_MAX_SCROLL_ATTEMPTS:
-                        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                        page.wait_for_load_state("networkidle", timeout=30000)
+                        try:
+                            page.evaluate("window.scrollTo(0, document.body.scrollHeight)", timeout=6000)
+                        except playwright._impl._errors.TimeoutError:
+                            logger.warning(f"Timeout while scrolling {initial_url}, skipping...")
+                            continue
+                        page.wait_for_load_state("domcontentloaded", timeout=60000)
                         new_height = page.evaluate("document.body.scrollHeight")
                         if new_height == previous_height:
                             break  # Stop scrolling when no more content is loaded
@@ -443,7 +457,7 @@ class WebConnector(LoadConnector):
                     Document(
                         id=initial_url,
                         sections=[
-                            TextSection(link=initial_url, text=parsed_html.cleaned_text)
+                            Section(link=initial_url, text=parsed_html.cleaned_text)
                         ],
                         source=DocumentSource.WEB,
                         semantic_identifier=parsed_html.title or initial_url,
@@ -460,19 +474,28 @@ class WebConnector(LoadConnector):
             except Exception as e:
                 last_error = f"Failed to fetch '{initial_url}': {e}"
                 logger.exception(last_error)
-                playwright.stop()
+                try:
+                    playwright.stop()
+                except Exception as e:
+                    logger.warning(f"Failed to stop Playwright: {e}")
                 restart_playwright = True
                 continue
 
             if len(doc_batch) >= self.batch_size:
-                playwright.stop()
+                try:
+                    playwright.stop()
+                except Exception as e:
+                    logger.warning(f"Failed to stop Playwright: {e}")
                 restart_playwright = True
                 at_least_one_doc = True
                 yield doc_batch
                 doc_batch = []
 
         if doc_batch:
-            playwright.stop()
+            try:
+                playwright.stop()
+            except Exception as e:
+                    logger.warning(f"Failed to stop Playwright: {e}")
             at_least_one_doc = True
             yield doc_batch
 

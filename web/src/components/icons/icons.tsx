@@ -2996,7 +2996,7 @@ export const OnyxIcon = ({
 }: IconProps) => {
   return (
     <svg
-      style={{ width: `${size}px`, height: `${size}px` }}
+      style={{ width: `${size}px`, height: `${size}px`, display: "none" }}
       className={`w-[${size}px] h-[${size}px] ` + className}
       viewBox="0 0 56 56"
       fill="none"

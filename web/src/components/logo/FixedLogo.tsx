@@ -67,7 +67,7 @@ export default function FixedLogo({
     <>
       <Link
         href="/chat"
-        className="fixed cursor-pointer flex z-40 left-4 top-3 h-8"
+        className="hidden fixed cursor-pointer z-40 left-4 top-3 h-8"
       >
         <LogoComponent
           enterpriseSettings={enterpriseSettings!}
