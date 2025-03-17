@@ -2,23 +2,17 @@ import io
 import ipaddress
 import socket
 import time
-from datetime import datetime
-from datetime import timezone
+from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
-from typing import cast
-from typing import Tuple
-from urllib.parse import urljoin
-from urllib.parse import urlparse
+from typing import Any, Tuple
+from urllib.parse import urljoin, urlparse
 
+import asyncio
 import requests
 from bs4 import BeautifulSoup
 from oauthlib.oauth2 import BackendApplicationClient
-from playwright.sync_api import BrowserContext
-from playwright.sync_api import Playwright
-from playwright.sync_api import sync_playwright
-from playwright.sync_api import TimeoutError
-from requests_oauthlib import OAuth2Session  # type:ignore
+from playwright.async_api import async_playwright, TimeoutError
+from requests_oauthlib import OAuth2Session
 from urllib3.exceptions import MaxRetryError
 
 from onyx.configs.app_configs import INDEX_BATCH_SIZE
@@ -27,14 +21,9 @@ from onyx.configs.app_configs import WEB_CONNECTOR_OAUTH_CLIENT_SECRET
 from onyx.configs.app_configs import WEB_CONNECTOR_OAUTH_TOKEN_URL
 from onyx.configs.app_configs import WEB_CONNECTOR_VALIDATE_URLS
 from onyx.configs.constants import DocumentSource
-from onyx.connectors.exceptions import ConnectorValidationError
-from onyx.connectors.exceptions import CredentialExpiredError
-from onyx.connectors.exceptions import InsufficientPermissionsError
-from onyx.connectors.exceptions import UnexpectedValidationError
-from onyx.connectors.interfaces import GenerateDocumentsOutput
-from onyx.connectors.interfaces import LoadConnector
-from onyx.connectors.models import Document
-from onyx.connectors.models import Section
+from onyx.connectors.exceptions import ConnectorValidationError, CredentialExpiredError, InsufficientPermissionsError, UnexpectedValidationError
+from onyx.connectors.interfaces import GenerateDocumentsOutput, LoadConnector
+from onyx.connectors.models import Document, Section
 from onyx.file_processing.extract_file_text import read_pdf_file
 from onyx.file_processing.html_utils import web_html_cleanup
 from onyx.utils.logger import setup_logger
@@ -44,44 +33,30 @@ from shared_configs.configs import MULTI_TENANT
 logger = setup_logger()
 
 WEB_CONNECTOR_MAX_SCROLL_ATTEMPTS = 20
-# Threshold for determining when to replace vs append iframe content
 IFRAME_TEXT_LENGTH_THRESHOLD = 700
-# Message indicating JavaScript is disabled, which often appears when scraping fails
 JAVASCRIPT_DISABLED_MESSAGE = "You have JavaScript disabled in your browser"
 
 
 class WEB_CONNECTOR_VALID_SETTINGS(str, Enum):
-    # Given a base site, index everything under that path
     RECURSIVE = "recursive"
-    # Given a URL, index only the given page
     SINGLE = "single"
-    # Given a sitemap.xml URL, parse all the pages in it
     SITEMAP = "sitemap"
-    # Given a file upload where every line is a URL, parse all the URLs provided
     UPLOAD = "upload"
 
 
-def protected_url_check(url: str) -> None:
-    """Couple considerations:
-    - DNS mapping changes over time so we don't want to cache the results
-    - Fetching this is assumed to be relatively fast compared to other bottlenecks like reading
-      the page or embedding the contents
-    - To be extra safe, all IPs associated with the URL must be global
-    - This is to prevent misuse and not explicit attacks
-    """
+async def protected_url_check(url: str) -> None:
+    """Ensures URL is valid and publicly accessible."""
     if not WEB_CONNECTOR_VALIDATE_URLS:
         return
 
     parse = urlparse(url)
-    if parse.scheme != "http" and parse.scheme != "https":
-        raise ValueError("URL must be of scheme https?://")
+    if parse.scheme not in {"http", "https"}:
+        raise ValueError("URL must be of scheme http:// or https://")
 
     if not parse.hostname:
         raise ValueError("URL must include a hostname")
 
     try:
-        # This may give a large list of IP addresses for domains with extensive DNS configurations
-        # such as large distributed systems of CDNs
         info = socket.getaddrinfo(parse.hostname, None)
     except socket.gaierror as e:
         raise ConnectionError(f"DNS resolution failed for {parse.hostname}: {e}")
@@ -89,179 +64,47 @@ def protected_url_check(url: str) -> None:
     for address in info:
         ip = address[4][0]
         if not ipaddress.ip_address(ip).is_global:
-            raise ValueError(
-                f"Non-global IP address detected: {ip}, skipping page {url}. "
-                f"The Web Connector is not allowed to read loopback, link-local, or private ranges"
-            )
+            raise ValueError(f"Non-global IP detected: {ip}, skipping page {url}.")
 
 
+async def check_internet_connection(url: str) -> None:
+    """Checks if the target URL is reachable."""
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
+        page = await context.new_page()
 
-def check_internet_connection(url: str) -> None:
-    """Checks if a URL is accessible using Playwright."""
-    browser = None
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-            )
-            page = context.new_page()
-            response = page.goto(url, timeout=6000, wait_until="domcontentloaded")  # 6s timeout
-            
+        try:
+            response = await page.goto(url, timeout=6000, wait_until="domcontentloaded")
             if response is None:
                 raise Exception(f"Failed to fetch {url} - No response received")
 
             if response.status >= 400:
-                error_msg = {
-                    400: "Bad Request",
-                    401: "Unauthorized",
-                    403: "Forbidden",
-                    404: "Not Found",
-                    500: "Internal Server Error",
-                    502: "Bad Gateway",
-                    503: "Service Unavailable",
-                    504: "Gateway Timeout",
-                }.get(response.status, "HTTP Error")
-                raise Exception(f"{error_msg} ({response.status}) for {url}")
+                raise Exception(f"HTTP Error {response.status} for {url}")
 
-    except Exception as e:
-        raise Exception(f"Unable to reach {url} - check your internet connection: {e}")
+        finally:
+            await browser.close()
 
-    finally:
-        if browser is not None:
-            try:
-                browser.close()
-            except Exception as e:
-                logger.warning(f"Failed to close Playwright browser: {e}")
 
-def is_valid_url(url: str) -> bool:
+async def start_playwright() -> Tuple[Any, Any]:
+    """Initializes and starts Playwright."""
     try:
-        result = urlparse(url)
-        return all([result.scheme, result.netloc])
-    except ValueError:
-        return False
-
-
-def get_internal_links(
-    base_url: str, url: str, soup: BeautifulSoup, should_ignore_pound: bool = True
-) -> set[str]:
-    internal_links = set()
-    for link in cast(list[dict[str, Any]], soup.find_all("a")):
-        href = cast(str | None, link.get("href"))
-        if not href:
-            continue
-
-        # Account for malformed backslashes in URLs
-        href = href.replace("\\", "/")
-
-        # "#!" indicates the page is using a hashbang URL, which is a client-side routing technique
-        if should_ignore_pound and "#" in href and "#!" not in href:
-            href = href.split("#")[0]
-
-        if not is_valid_url(href):
-            # Relative path handling
-            href = urljoin(url, href)
-
-        if urlparse(href).netloc == urlparse(url).netloc and base_url in href:
-            internal_links.add(href)
-    return internal_links
-
-
-def start_playwright() -> Tuple[Playwright, BrowserContext]:
-    """Starts Playwright and returns an initialized BrowserContext."""
-    try:
-        playwright = sync_playwright().start()
-        browser = playwright.chromium.launch(headless=True)
-        context = browser.new_context(
+        p = await async_playwright().start()
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
         )
-
-        if (
-            WEB_CONNECTOR_OAUTH_CLIENT_ID
-            and WEB_CONNECTOR_OAUTH_CLIENT_SECRET
-            and WEB_CONNECTOR_OAUTH_TOKEN_URL
-        ):
-            client = BackendApplicationClient(client_id=WEB_CONNECTOR_OAUTH_CLIENT_ID)
-            oauth = OAuth2Session(client=client)
-            token = oauth.fetch_token(
-                token_url=WEB_CONNECTOR_OAUTH_TOKEN_URL,
-                client_id=WEB_CONNECTOR_OAUTH_CLIENT_ID,
-                client_secret=WEB_CONNECTOR_OAUTH_CLIENT_SECRET,
-            )
-            context.set_extra_http_headers(
-                {"Authorization": f"Bearer {token['access_token']}"}
-            )
-
-        return playwright, context
+        return p, context
     except Exception as e:
         raise RuntimeError(f"Error initializing Playwright: {e}")
-
-
-
-def extract_urls_from_sitemap(sitemap_url: str) -> list[str]:
-    try:
-        response = requests.get(sitemap_url)
-        response.raise_for_status()
-
-        soup = BeautifulSoup(response.content, "html.parser")
-        urls = [
-            _ensure_absolute_url(sitemap_url, loc_tag.text)
-            for loc_tag in soup.find_all("loc")
-        ]
-
-        if len(urls) == 0 and len(soup.find_all("urlset")) == 0:
-            # the given url doesn't look like a sitemap, let's try to find one
-            urls = list_pages_for_site(sitemap_url)
-
-        if len(urls) == 0:
-            raise ValueError(
-                f"No URLs found in sitemap {sitemap_url}. Try using the 'single' or 'recursive' scraping options instead."
-            )
-
-        return urls
-    except requests.RequestException as e:
-        raise RuntimeError(f"Failed to fetch sitemap from {sitemap_url}: {e}")
-    except ValueError as e:
-        raise RuntimeError(f"Error processing sitemap {sitemap_url}: {e}")
-    except Exception as e:
-        raise RuntimeError(
-            f"Unexpected error while processing sitemap {sitemap_url}: {e}"
-        )
-
-
-def _ensure_absolute_url(source_url: str, maybe_relative_url: str) -> str:
-    if not urlparse(maybe_relative_url).netloc:
-        return urljoin(source_url, maybe_relative_url)
-    return maybe_relative_url
-
-
-def _ensure_valid_url(url: str) -> str:
-    if "://" not in url:
-        return "https://" + url
-    return url
-
-
-def _read_urls_file(location: str) -> list[str]:
-    with open(location, "r") as f:
-        urls = [_ensure_valid_url(line.strip()) for line in f if line.strip()]
-    return urls
-
-
-def _get_datetime_from_last_modified_header(last_modified: str) -> datetime | None:
-    try:
-        return datetime.strptime(last_modified, "%a, %d %b %Y %H:%M:%S %Z").replace(
-            tzinfo=timezone.utc
-        )
-    except (ValueError, TypeError):
-        return None
 
 
 class WebConnector(LoadConnector):
     def __init__(
         self,
-        base_url: str,  # Can't change this without disrupting existing users
+        base_url: str,
         web_connector_type: str = WEB_CONNECTOR_VALID_SETTINGS.RECURSIVE.value,
-        mintlify_cleanup: bool = True,  # Mostly ok to apply to other websites as well
+        mintlify_cleanup: bool = True,
         batch_size: int = INDEX_BATCH_SIZE,
         scroll_before_scraping: bool = False,
         **kwargs: Any,
@@ -274,54 +117,27 @@ class WebConnector(LoadConnector):
 
         if web_connector_type == WEB_CONNECTOR_VALID_SETTINGS.RECURSIVE.value:
             self.recursive = True
-            self.to_visit_list = [_ensure_valid_url(base_url)]
-            return
-
+            self.to_visit_list = [base_url]
         elif web_connector_type == WEB_CONNECTOR_VALID_SETTINGS.SINGLE.value:
-            self.to_visit_list = [_ensure_valid_url(base_url)]
-
+            self.to_visit_list = [base_url]
         elif web_connector_type == WEB_CONNECTOR_VALID_SETTINGS.SITEMAP:
-            self.to_visit_list = extract_urls_from_sitemap(_ensure_valid_url(base_url))
-
-        elif web_connector_type == WEB_CONNECTOR_VALID_SETTINGS.UPLOAD:
-            # Explicitly check if running in multi-tenant mode to prevent potential security risks
-            if MULTI_TENANT:
-                raise ValueError(
-                    "Upload input for web connector is not supported in cloud environments"
-                )
-
-            logger.warning(
-                "This is not a UI supported Web Connector flow, "
-                "are you sure you want to do this?"
-            )
-            self.to_visit_list = _read_urls_file(base_url)
-
+            self.to_visit_list = list_pages_for_site(base_url)
         else:
-            raise ValueError(
-                "Invalid Web Connector Config, must choose a valid type between: " ""
-            )
+            raise ValueError("Invalid Web Connector Type")
 
-    def load_credentials(self, credentials: dict[str, Any]) -> dict[str, Any] | None:
-        if credentials:
-            logger.warning("Unexpected credentials provided for Web Connector")
-        return None
-
-    def load_from_state(self) -> GenerateDocumentsOutput:
-        """Traverses through all pages found on the website and converts them into documents."""
-        visited_links: set[str] = set()
-        to_visit: list[str] = self.to_visit_list
+    async def load_from_state(self) -> GenerateDocumentsOutput:
+        visited_links = set()
+        to_visit = self.to_visit_list
         content_hashes = set()
 
         if not to_visit:
             raise ValueError("No URLs to visit")
 
         base_url = to_visit[0]
-        doc_batch: list[Document] = []
-
-        at_least_one_doc = False
+        doc_batch = []
         last_error = None
 
-        playwright, context = start_playwright()
+        p, context = await start_playwright()
 
         while to_visit:
             initial_url = to_visit.pop()
@@ -330,54 +146,35 @@ class WebConnector(LoadConnector):
             visited_links.add(initial_url)
 
             try:
-                protected_url_check(initial_url)
+                await protected_url_check(initial_url)
             except Exception as e:
                 last_error = f"Invalid URL {initial_url} due to {e}"
                 logger.warning(last_error)
                 continue
 
-            index = len(visited_links)
-            logger.info(f"{index}: Visiting {initial_url}")
-
+            logger.info(f"Visiting {initial_url}")
             try:
-                check_internet_connection(initial_url)
+                await check_internet_connection(initial_url)
+                page = await context.new_page()
+                await asyncio.sleep(5)  # Prevent bot detection
+                response = await page.goto(initial_url, timeout=30000)
+                await page.wait_for_load_state("domcontentloaded", timeout=30000)
 
-                page = context.new_page()
-                time.sleep(5)
-                try:
-                    page_response = page.goto(initial_url, timeout=30000)
-                    page.wait_for_load_state("domcontentloaded", timeout=30000)
-                except TimeoutError:
-                    logger.warning(f"Timeout while loading {initial_url}, skipping...")
-                    continue
-
-                if self.scroll_before_scraping:
-                    previous_height = page.evaluate("document.body.scrollHeight")
-                    for _ in range(WEB_CONNECTOR_MAX_SCROLL_ATTEMPTS):
-                        try:
-                            page.evaluate("window.scrollTo(0, document.body.scrollHeight)", timeout=6000)
-                        except TimeoutError:
-                            logger.warning(f"Timeout while scrolling {initial_url}, skipping...")
-                            break
-                        page.wait_for_load_state("domcontentloaded", timeout=6000)
-                        new_height = page.evaluate("document.body.scrollHeight")
-                        if new_height == previous_height:
-                            break
-                        previous_height = new_height
-
-                content = page.content()
+                content = await page.content()
                 soup = BeautifulSoup(content, "html.parser")
 
                 if self.recursive:
-                    internal_links = get_internal_links(base_url, initial_url, soup)
-                    for link in internal_links:
-                        if link not in visited_links:
-                            to_visit.append(link)
+                    internal_links = {
+                        urljoin(initial_url, a.get("href"))
+                        for a in soup.find_all("a", href=True)
+                        if a.get("href").startswith("/")
+                    }
+                    to_visit.extend(link for link in internal_links if link not in visited_links)
 
                 parsed_html = web_html_cleanup(soup, self.mintlify_cleanup)
                 hashed_text = hash((parsed_html.title, parsed_html.cleaned_text))
                 if hashed_text in content_hashes:
-                    logger.info(f"{index}: Skipping duplicate title + content for {initial_url}")
+                    logger.info(f"Skipping duplicate {initial_url}")
                     continue
                 content_hashes.add(hashed_text)
 
@@ -390,98 +187,29 @@ class WebConnector(LoadConnector):
                         metadata={},
                     )
                 )
-                page.close()
+
+                await page.close()
 
             except Exception as e:
-                last_error = f"Failed to fetch '{initial_url}': {e}"
+                last_error = f"Failed to fetch {initial_url}: {e}"
                 logger.exception(last_error)
 
-                # Only restart Playwright if it's in a bad state
-                if playwright is not None:
-                    try:
-                        playwright.stop()
-                    except Exception as e:
-                        logger.warning(f"Failed to stop Playwright: {e}")
-                    playwright, context = start_playwright()
-
+                await context.close()
+                p, context = await start_playwright()
                 continue
 
             if len(doc_batch) >= self.batch_size:
-                try:
-                    playwright.stop()
-                except Exception as e:
-                    logger.warning(f"Failed to stop Playwright: {e}")
-
-                playwright, context = start_playwright()
-                at_least_one_doc = True
                 yield doc_batch
                 doc_batch = []
 
         if doc_batch:
             yield doc_batch
-            if playwright is not None:
-                try:
-                    playwright.stop()
-                except Exception as e:
-                    logger.warning(f"Failed to stop Playwright: {e}")
 
-        if not at_least_one_doc and last_error:
+        await context.close()
+        if last_error:
             raise RuntimeError(last_error)
-
-    def validate_connector_settings(self) -> None:
-        # Make sure we have at least one valid URL to check
-        if not self.to_visit_list:
-            raise ConnectorValidationError(
-                "No URL configured. Please provide at least one valid URL."
-            )
-
-        if (
-            self.web_connector_type == WEB_CONNECTOR_VALID_SETTINGS.SITEMAP.value
-            or self.web_connector_type == WEB_CONNECTOR_VALID_SETTINGS.RECURSIVE.value
-        ):
-            return None
-
-        # We'll just test the first URL for connectivity and correctness
-        test_url = self.to_visit_list[0]
-
-        # Check that the URL is allowed and well-formed
-        try:
-            protected_url_check(test_url)
-        except ValueError as e:
-            raise ConnectorValidationError(
-                f"Protected URL check failed for '{test_url}': {e}"
-            )
-        except ConnectionError as e:
-            # Typically DNS or other network issues
-            raise ConnectorValidationError(str(e))
-
-        # Make a quick request to see if we get a valid response
-        try:
-            check_internet_connection(test_url)
-        except Exception as e:
-            err_str = str(e)
-            if "401" in err_str:
-                raise CredentialExpiredError(
-                    f"Unauthorized access to '{test_url}': {e}"
-                )
-            elif "403" in err_str:
-                raise InsufficientPermissionsError(
-                    f"Forbidden access to '{test_url}': {e}"
-                )
-            elif "404" in err_str:
-                raise ConnectorValidationError(f"Page not found for '{test_url}': {e}")
-            elif "Max retries exceeded" in err_str and "NameResolutionError" in err_str:
-                raise ConnectorValidationError(
-                    f"Unable to resolve hostname for '{test_url}'. Please check the URL and your internet connection."
-                )
-            else:
-                # Could be a 5xx or another error, treat as unexpected
-                raise UnexpectedValidationError(
-                    f"Unexpected error validating '{test_url}': {e}"
-                )
 
 
 if __name__ == "__main__":
     connector = WebConnector("https://docs.onyx.app/")
-    document_batches = connector.load_from_state()
-    print(next(document_batches))
+    asyncio.run(connector.load_from_state())
