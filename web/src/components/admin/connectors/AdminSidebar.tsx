@@ -28,7 +28,7 @@ export function AdminSidebar({ collections }: { collections: Collection[] }) {
   return (
     <div className="text-text-settings-sidebar pl-0">
       <nav className="space-y-2">
-        <div className="w-full ml-4  mt-1 h-8 justify-start mb-4 flex">
+        <div className="hidden w-full ml-4  mt-1 h-8 justify-start mb-4">
           <LogoComponent
             show={true}
             enterpriseSettings={enterpriseSettings!}

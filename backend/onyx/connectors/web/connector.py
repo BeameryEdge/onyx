@@ -16,7 +16,7 @@ from oauthlib.oauth2 import BackendApplicationClient
 from playwright.sync_api import BrowserContext
 from playwright.sync_api import Playwright
 from playwright.sync_api import sync_playwright
-from playwright.async_api import async_playwright
+from playwright.sync_api import TimeoutError
 from requests_oauthlib import OAuth2Session  # type:ignore
 from urllib3.exceptions import MaxRetryError
 
@@ -94,21 +94,23 @@ def protected_url_check(url: str) -> None:
             )
 
 
-async def check_internet_connection(url: str) -> None:
+
+def check_internet_connection(url: str) -> None:
+    """Checks if a URL is accessible using Playwright."""
+    browser = None
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
             )
-            page = await context.new_page()
-            response = await page.goto(url, timeout=6000, wait_until="domcontentloaded")  # 6s timeout
+            page = context.new_page()
+            response = page.goto(url, timeout=6000, wait_until="domcontentloaded")  # 6s timeout
             
             if response is None:
                 raise Exception(f"Failed to fetch {url} - No response received")
 
-            status_code = response.status
-            if status_code >= 400:
+            if response.status >= 400:
                 error_msg = {
                     400: "Bad Request",
                     401: "Unauthorized",
@@ -118,13 +120,18 @@ async def check_internet_connection(url: str) -> None:
                     502: "Bad Gateway",
                     503: "Service Unavailable",
                     504: "Gateway Timeout",
-                }.get(status_code, "HTTP Error")
-                raise Exception(f"{error_msg} ({status_code}) for {url}")
+                }.get(response.status, "HTTP Error")
+                raise Exception(f"{error_msg} ({response.status}) for {url}")
 
-            await browser.close()
-    
     except Exception as e:
         raise Exception(f"Unable to reach {url} - check your internet connection: {e}")
+
+    finally:
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception as e:
+                logger.warning(f"Failed to close Playwright browser: {e}")
 
 def is_valid_url(url: str) -> bool:
     try:
@@ -160,29 +167,34 @@ def get_internal_links(
 
 
 def start_playwright() -> Tuple[Playwright, BrowserContext]:
-    playwright = sync_playwright().start()
-
-    browser = playwright.chromium.launch(headless=True)
-
-    context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-
-    if (
-        WEB_CONNECTOR_OAUTH_CLIENT_ID
-        and WEB_CONNECTOR_OAUTH_CLIENT_SECRET
-        and WEB_CONNECTOR_OAUTH_TOKEN_URL
-    ):
-        client = BackendApplicationClient(client_id=WEB_CONNECTOR_OAUTH_CLIENT_ID)
-        oauth = OAuth2Session(client=client)
-        token = oauth.fetch_token(
-            token_url=WEB_CONNECTOR_OAUTH_TOKEN_URL,
-            client_id=WEB_CONNECTOR_OAUTH_CLIENT_ID,
-            client_secret=WEB_CONNECTOR_OAUTH_CLIENT_SECRET,
-        )
-        context.set_extra_http_headers(
-            {"Authorization": "Bearer {}".format(token["access_token"])}
+    """Starts Playwright and returns an initialized BrowserContext."""
+    try:
+        playwright = sync_playwright().start()
+        browser = playwright.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
         )
 
-    return playwright, context
+        if (
+            WEB_CONNECTOR_OAUTH_CLIENT_ID
+            and WEB_CONNECTOR_OAUTH_CLIENT_SECRET
+            and WEB_CONNECTOR_OAUTH_TOKEN_URL
+        ):
+            client = BackendApplicationClient(client_id=WEB_CONNECTOR_OAUTH_CLIENT_ID)
+            oauth = OAuth2Session(client=client)
+            token = oauth.fetch_token(
+                token_url=WEB_CONNECTOR_OAUTH_TOKEN_URL,
+                client_id=WEB_CONNECTOR_OAUTH_CLIENT_ID,
+                client_secret=WEB_CONNECTOR_OAUTH_CLIENT_SECRET,
+            )
+            context.set_extra_http_headers(
+                {"Authorization": f"Bearer {token['access_token']}"}
+            )
+
+        return playwright, context
+    except Exception as e:
+        raise RuntimeError(f"Error initializing Playwright: {e}")
+
 
 
 def extract_urls_from_sitemap(sitemap_url: str) -> list[str]:
@@ -294,8 +306,7 @@ class WebConnector(LoadConnector):
         return None
 
     def load_from_state(self) -> GenerateDocumentsOutput:
-        """Traverses through all pages found on the website
-        and converts them into documents"""
+        """Traverses through all pages found on the website and converts them into documents."""
         visited_links: set[str] = set()
         to_visit: list[str] = self.to_visit_list
         content_hashes = set()
@@ -303,15 +314,14 @@ class WebConnector(LoadConnector):
         if not to_visit:
             raise ValueError("No URLs to visit")
 
-        base_url = to_visit[0]  # For the recursive case
+        base_url = to_visit[0]
         doc_batch: list[Document] = []
 
-        # Needed to report error
         at_least_one_doc = False
         last_error = None
 
         playwright, context = start_playwright()
-        restart_playwright = False
+
         while to_visit:
             initial_url = to_visit.pop()
             if initial_url in visited_links:
@@ -330,80 +340,28 @@ class WebConnector(LoadConnector):
 
             try:
                 check_internet_connection(initial_url)
-                if restart_playwright:
-                    try:
-                        playwright.stop()
-                    except Exception as e:
-                        logger.warning(f"Failed to stop Playwright: {e}")
-                    playwright, context = start_playwright()
-                    restart_playwright = False
-
-                if initial_url.split(".")[-1] == "pdf":
-                    # PDF files are not checked for links
-                    response = requests.get(initial_url)
-                    page_text, metadata, images = read_pdf_file(
-                        file=io.BytesIO(response.content)
-                    )
-                    last_modified = response.headers.get("Last-Modified")
-
-                    doc_batch.append(
-                        Document(
-                            id=initial_url,
-                            sections=[Section(link=initial_url, text=page_text)],
-                            source=DocumentSource.WEB,
-                            semantic_identifier=initial_url.split("/")[-1],
-                            metadata=metadata,
-                            doc_updated_at=_get_datetime_from_last_modified_header(
-                                last_modified
-                            )
-                            if last_modified
-                            else None,
-                        )
-                    )
-                    continue
 
                 page = context.new_page()
-
                 try:
                     page_response = page.goto(initial_url, timeout=30000)
-                    page.wait_for_load_state("domcontentloaded", timeout=30000)  # Change from "networkidle"
-                except playwright._impl._errors.TimeoutError:
+                    page.wait_for_load_state("domcontentloaded", timeout=30000)
+                except TimeoutError:
                     logger.warning(f"Timeout while loading {initial_url}, skipping...")
                     continue
 
-                last_modified = (
-                    page_response.header_value("Last-Modified")
-                    if page_response
-                    else None
-                )
-                
-                final_url = page.url
-                if final_url != initial_url:
-                    protected_url_check(final_url)
-                    initial_url = final_url
-                    if initial_url in visited_links:
-                        logger.info(
-                            f"{index}: {initial_url} redirected to {final_url} - already indexed"
-                        )
-                        continue
-                    logger.info(f"{index}: {initial_url} redirected to {final_url}")
-                    visited_links.add(initial_url)
-
                 if self.scroll_before_scraping:
-                    scroll_attempts = 0
                     previous_height = page.evaluate("document.body.scrollHeight")
-                    while scroll_attempts < WEB_CONNECTOR_MAX_SCROLL_ATTEMPTS:
+                    for _ in range(WEB_CONNECTOR_MAX_SCROLL_ATTEMPTS):
                         try:
                             page.evaluate("window.scrollTo(0, document.body.scrollHeight)", timeout=6000)
-                        except playwright._impl._errors.TimeoutError:
+                        except TimeoutError:
                             logger.warning(f"Timeout while scrolling {initial_url}, skipping...")
-                            continue
-                        page.wait_for_load_state("domcontentloaded", timeout=60000)
+                            break
+                        page.wait_for_load_state("domcontentloaded", timeout=6000)
                         new_height = page.evaluate("document.body.scrollHeight")
                         if new_height == previous_height:
-                            break  # Stop scrolling when no more content is loaded
+                            break
                         previous_height = new_height
-                        scroll_attempts += 1
 
                 content = page.content()
                 soup = BeautifulSoup(content, "html.parser")
@@ -414,71 +372,35 @@ class WebConnector(LoadConnector):
                         if link not in visited_links:
                             to_visit.append(link)
 
-                if page_response and str(page_response.status)[0] in ("4", "5"):
-                    last_error = f"Skipped indexing {initial_url} due to HTTP {page_response.status} response"
-                    logger.info(last_error)
-                    continue
-
                 parsed_html = web_html_cleanup(soup, self.mintlify_cleanup)
-
-                """For websites containing iframes that need to be scraped,
-                the code below can extract text from within these iframes.
-                """
-                logger.debug(
-                    f"{index}: Length of cleaned text {len(parsed_html.cleaned_text)}"
-                )
-                if JAVASCRIPT_DISABLED_MESSAGE in parsed_html.cleaned_text:
-                    iframe_count = page.frame_locator("iframe").locator("html").count()
-                    if iframe_count > 0:
-                        iframe_texts = (
-                            page.frame_locator("iframe")
-                            .locator("html")
-                            .all_inner_texts()
-                        )
-                        document_text = "\n".join(iframe_texts)
-                        """ 700 is the threshold value for the length of the text extracted
-                        from the iframe based on the issue faced """
-                        if len(parsed_html.cleaned_text) < IFRAME_TEXT_LENGTH_THRESHOLD:
-                            parsed_html.cleaned_text = document_text
-                        else:
-                            parsed_html.cleaned_text += "\n" + document_text
-
-                # Sometimes pages with #! will serve duplicate content
-                # There are also just other ways this can happen
                 hashed_text = hash((parsed_html.title, parsed_html.cleaned_text))
                 if hashed_text in content_hashes:
-                    logger.info(
-                        f"{index}: Skipping duplicate title + content for {initial_url}"
-                    )
+                    logger.info(f"{index}: Skipping duplicate title + content for {initial_url}")
                     continue
                 content_hashes.add(hashed_text)
 
                 doc_batch.append(
                     Document(
                         id=initial_url,
-                        sections=[
-                            Section(link=initial_url, text=parsed_html.cleaned_text)
-                        ],
+                        sections=[Section(link=initial_url, text=parsed_html.cleaned_text)],
                         source=DocumentSource.WEB,
                         semantic_identifier=parsed_html.title or initial_url,
                         metadata={},
-                        doc_updated_at=_get_datetime_from_last_modified_header(
-                            last_modified
-                        )
-                        if last_modified
-                        else None,
                     )
                 )
-
                 page.close()
+
             except Exception as e:
                 last_error = f"Failed to fetch '{initial_url}': {e}"
                 logger.exception(last_error)
-                try:
-                    playwright.stop()
-                except Exception as e:
-                    logger.warning(f"Failed to stop Playwright: {e}")
-                restart_playwright = True
+
+                if playwright is not None:
+                    try:
+                        playwright.stop()
+                    except Exception as e:
+                        logger.warning(f"Failed to stop Playwright: {e}")
+
+                playwright, context = start_playwright()
                 continue
 
             if len(doc_batch) >= self.batch_size:
@@ -486,23 +408,22 @@ class WebConnector(LoadConnector):
                     playwright.stop()
                 except Exception as e:
                     logger.warning(f"Failed to stop Playwright: {e}")
-                restart_playwright = True
+
+                playwright, context = start_playwright()
                 at_least_one_doc = True
                 yield doc_batch
                 doc_batch = []
 
         if doc_batch:
-            try:
-                playwright.stop()
-            except Exception as e:
+            if playwright is not None:
+                try:
+                    playwright.stop()
+                except Exception as e:
                     logger.warning(f"Failed to stop Playwright: {e}")
-            at_least_one_doc = True
             yield doc_batch
 
-        if not at_least_one_doc:
-            if last_error:
-                raise RuntimeError(last_error)
-            raise RuntimeError("No valid pages found.")
+        if not at_least_one_doc and last_error:
+            raise RuntimeError(last_error)
 
     def validate_connector_settings(self) -> None:
         # Make sure we have at least one valid URL to check

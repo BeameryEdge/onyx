@@ -33,7 +33,7 @@ export function Logo({
     !settings.enterpriseSettings.use_custom_logo
   ) {
     return (
-      <div style={{ height, width }} className={className}>
+      <div style={{ height, width }} className='hidden'>
         <OnyxIcon
           size={height}
           className={`${className} dark:text-[#fff] text-[#000]`}
